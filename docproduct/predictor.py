@@ -1,9 +1,5 @@
-import json
 import os
-import re
 from collections import defaultdict
-from multiprocessing import Pool, cpu_count
-from time import time
 
 import faiss
 import numpy as np
@@ -11,7 +7,6 @@ import pandas as pd
 import tensorflow as tf
 from tqdm import tqdm
 
-import gpt2_estimator
 from docproduct.dataset import convert_text_to_feature
 from docproduct.models import MedicalQAModelwithBert
 from docproduct.tokenization import FullTokenizer
@@ -219,91 +214,3 @@ class RetreiveQADoc(object):
         embedding = self.qa_embed.predict(questions=questions)
         return embedding
 
-
-class GenerateQADoc(object):
-    def __init__(self,
-                 pretrained_path='models/pubmed_pmc_470k/',
-                 ffn_weight_file=None,
-                 bert_ffn_weight_file='models/bertffn_crossentropy/bertffn',
-                 gpt2_weight_file='models/gpt2',
-                 embedding_file='qa_embeddings/bertffn_crossentropy.zip'
-                 ):
-        super(GenerateQADoc, self).__init__()
-        tf.compat.v1.disable_eager_execution()
-        session_config = tf.compat.v1.ConfigProto(
-            allow_soft_placement=True)
-        session_config.gpu_options.allow_growth = False
-        config = tf.estimator.RunConfig(
-            session_config=session_config)
-        self.batch_size = 1
-        self.gpt2_weight_file = gpt2_weight_file
-        gpt2_model_fn = gpt2_estimator.get_gpt2_model_fn(
-            accumulate_gradients=5,
-            learning_rate=0.1,
-            length=512,
-            batch_size=self.batch_size,
-            temperature=0.7,
-            top_k=0
-        )
-        hparams = gpt2_estimator.default_hparams()
-        with open(os.path.join(gpt2_weight_file, 'hparams.json')) as f:
-            hparams.override_from_dict(json.load(f))
-        self.estimator = tf.estimator.Estimator(
-            gpt2_model_fn,
-            model_dir=gpt2_weight_file,
-            params=hparams,
-            config=config)
-        self.encoder = gpt2_estimator.encoder.get_encoder(gpt2_weight_file)
-
-        config = tf.compat.v1.ConfigProto()
-        config.gpu_options.allow_growth = True
-        self.embed_sess = tf.compat.v1.Session(config=config)
-        with self.embed_sess.as_default():
-            self.qa_embed = QAEmbed(
-                pretrained_path=pretrained_path,
-                ffn_weight_file=ffn_weight_file,
-                bert_ffn_weight_file=bert_ffn_weight_file,
-                with_answer=False,
-                load_pretrain=False
-            )
-
-        self.faiss_topk = FaissTopK(embedding_file)
-
-    def _get_gpt2_inputs(self, question, questions, answers):
-        assert len(questions) == len(answers)
-        line = '`QUESTION: %s `ANSWER: ' % question
-        for q, a in zip(questions, answers):
-            line = '`QUESTION: %s `ANSWER: %s ' % (q, a) + line
-        return line
-
-    def predict(self, questions, search_by='answer', topk=5, answer_only=False):
-        embedding = self.qa_embed.predict(
-            questions=questions, dataset=False).eval(session=self.embed_sess)
-        if answer_only:
-            topk_answer = self.faiss_topk.predict(
-                embedding, search_by, topk, answer_only)
-        else:
-            topk_question, topk_answer = self.faiss_topk.predict(
-                embedding, search_by, topk, answer_only)
-
-        gpt2_input = self._get_gpt2_inputs(
-            questions[0], topk_question, topk_answer)
-        gpt2_pred = self.estimator.predict(
-            lambda: gpt2_estimator.predict_input_fn(inputs=gpt2_input, batch_size=self.batch_size, checkpoint_path=self.gpt2_weight_file))
-        raw_output = gpt2_estimator.predictions_parsing(
-            gpt2_pred, self.encoder)
-        # result_list = [re.search('`ANSWER:(.*)`QUESTION:', s)
-        #                for s in raw_output]
-        # result_list = [s for s in result_list if s]
-        # try:
-        #     r = result_list[0].group(1)
-        # except (AttributeError, IndexError):
-        #     r = topk_answer[0]
-        refine1 = re.sub('`QUESTION:.*?`ANSWER:','' , str(raw_output[0]) , flags=re.DOTALL)
-        refine2 = refine1.split('`QUESTION: ')[0]
-        return refine2
-
-
-if __name__ == "__main__":
-    gen = GenerateQADoc()
-    print(gen.predict('my eyes hurt'))
