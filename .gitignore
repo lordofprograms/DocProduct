@@ -11,6 +11,8 @@ reddit_submissions/*.bz2
 # C extensions
 *.so
 
+.idea
+
 # Distribution / packaging
 .Python
 build/
